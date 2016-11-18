@@ -22,7 +22,7 @@ class ImportScripts::Mbox < ImportScripts::Base
   MBOX_SUBDIR = ENV['MBOX_SUBDIR'] || "messages" # subdirectory with mbox files
   LIST_NAME = ENV['LIST_NAME'] || "" # Will remove [LIST_NAME] from Subjects
   DEFAULT_TRUST_LEVEL = ENV['DEFAULT_TRUST_LEVEL'] || 1
-  DATA_DIR = ENV['DATA_DIR'] || "~/data/import"
+  DATA_DIR = ENV['DATA_DIR'] || "~/discourse/data/import"
   MBOX_DIR = File.expand_path(DATA_DIR) # where index.db will be created
   BATCH_SIZE = 1000
 
@@ -50,6 +50,7 @@ class ImportScripts::Mbox < ImportScripts::Base
 
   def execute
     import_categories
+    initialize_database
     create_email_indices
     create_user_indices
     massage_indices
@@ -67,20 +68,59 @@ class ImportScripts::Mbox < ImportScripts::Base
     end
   end
 
+  def initialize_database
+    if File.exists?("#{MBOX_DIR}/index.db")
+      puts "","************************************************************************"
+      puts "NOTICE: Opening existing SQLite3 database. If this isn't what you want, "
+      puts "please interrupt execution with CTRL-C now."
+      puts "************************************************************************"
+      sleep(5)
+    else
+      puts "","Couldn't find existing SQLite3 database, creating new one."
+      db = SQLite3::Database.new("#{MBOX_DIR}/index.db")
+      db.execute "DROP TABLE IF EXISTS emails"
+      db.execute <<-SQL
+        CREATE TABLE emails (
+          msg_id VARCHAR(995) PRIMARY KEY,
+          from_email VARCHAR(255) NOT NULL,
+          from_name VARCHAR(255) NOT NULL,
+          title VARCHAR(255) NOT NULL,
+          reply_to VARCHAR(955) NULL,
+          email_date DATETIME NOT NULL,
+          message TEXT NOT NULL,
+          category VARCHAR(255) NOT NULL
+        );
+      SQL
+
+      db.execute "DROP TABLE IF EXISTS users"
+      db.execute <<-SQL
+        CREATE TABLE users (
+          email VARCHAR(995) PRIMARY KEY,
+          name VARCHAR(255) NOT NULL
+        );
+      SQL
+
+      puts "Done creating db and tables."
+      sleep(2)
+    end
+  end
+
   def open_db
-    SQLite3::Database.new("#{MBOX_DIR}/index.db")
+    SQLite3::Database.open("#{MBOX_DIR}/index.db")
   end
 
   def each_line(f)
     infile = File.open(f, 'r')
-    if f.ends_with?('.gz')
-      gz = Zlib::GzipReader.new(infile)
-      gz.each_line do |line|
-        yield line
-      end
-    else
-      infile.each_line do |line|
-        yield line
+    if !File.directory?(infile)
+      if f.ends_with?('.gz')
+        gz = Zlib::GzipReader.new(infile)
+        gz.each_line do |line|
+          yield line
+        end
+      else
+        infile.each_line do |line|
+          yield line
+        end
       end
     end
   ensure
@@ -91,7 +131,7 @@ class ImportScripts::Mbox < ImportScripts::Base
     files = Dir["#{MBOX_DIR}/#{MBOX_SUBDIR}/*"]
 
     CATEGORY_MAPPINGS.keys.each do |k|
-      files << Dir["#{MBOX_DIR}/#{k}/*"]
+      files << Dir["#{MBOX_DIR}/#{MBOX_SUBDIR}/#{k}/*"]
     end
 
     files.flatten!
@@ -218,22 +258,8 @@ p    end
 
   def create_email_indices
     db = open_db
-    db.execute "DROP TABLE IF EXISTS emails"
-    db.execute <<-SQL
-      CREATE TABLE emails (
-        msg_id VARCHAR(995) PRIMARY KEY,
-        from_email VARCHAR(255) NOT NULL,
-        from_name VARCHAR(255) NOT NULL,
-        title VARCHAR(255) NOT NULL,
-        reply_to VARCHAR(955) NULL,
-        email_date DATETIME NOT NULL,
-        message TEXT NOT NULL,
-        category VARCHAR(255) NOT NULL
-      );
-    SQL
-
-    db.execute "CREATE INDEX by_title ON emails (title)"
-    db.execute "CREATE INDEX by_email ON emails (from_email)"
+    db.execute "CREATE INDEX IF NOT EXISTS by_title ON emails (title)"
+    db.execute "CREATE INDEX IF NOT EXISTS by_email ON emails (from_email)"
 
     puts "", "creating indices"
 
@@ -276,14 +302,6 @@ p    end
 
   def create_user_indices
     db = open_db
-    db.execute "DROP TABLE IF EXISTS users"
-    db.execute <<-SQL
-      CREATE TABLE users (
-        email VARCHAR(995) PRIMARY KEY,
-        name VARCHAR(255) NOT NULL
-      );
-    SQL
-
     db.execute "INSERT OR IGNORE INTO users (email, name) SELECT from_email, from_name FROM emails"
   ensure
     db.close
